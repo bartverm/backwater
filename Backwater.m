@@ -151,6 +151,8 @@ classdef Backwater < handle
         %             Backwater/plot
         color_bed(1,3) double {mustBeFinite, mustBeNonnegative, mustBeLessThanOrEqual(color_bed, 1), mustBeReal} = [204, 178, 178]/255
         
+        zb0(1,1) double {mustBeFinite, mustBeReal}=0;
+        
         % Backwater/bed_offset - additional thickness of the bed in plots
         %
         %   Sets an additional thickness of the bed in plots (m).
@@ -246,6 +248,10 @@ classdef Backwater < handle
         %   See also: Backwater, Backwater/a_critical, 
         %       Backwater/a_equilibrium, Backwater/slope_type
         curve_type
+        
+        bed_level
+        is_supercritical
+        is_equilibrium
     end
     methods
         
@@ -268,8 +274,22 @@ classdef Backwater < handle
                 end
             end
         end
+        function val=get.is_supercritical(obj)
+            if obj.a0-obj.a_critical<eps
+                val=true;
+            else
+                val=false;
+            end
+        end
+        function val=get.is_equilibrium(obj)
+            if abs(obj.a0-obj.a_equilibrium)<eps
+                val=true;
+            else
+                val=false;
+            end
+        end
         function set.x_end(obj,val)
-            if obj.a0<=obj.a_critical
+            if obj.is_supercritical
                 if val < obj.x0
                     warning('End of curve must be downstream of bc in supercritical flow, negating end')
                     obj.x_end=-val;
@@ -286,7 +306,7 @@ classdef Backwater < handle
             end
         end
         function val=get.x_target(obj)
-            if abs(obj.a0-obj.a_equilibrium)<eps
+            if obj.is_equilibrium
                 val=obj.a_critical/obj.Sc;
             else
                 val=obj.x0+obj.bresse(obj.a_target);
@@ -296,6 +316,10 @@ classdef Backwater < handle
             val=obj.g/obj.Chez^2;
         end
         function val=get.slope_type(obj)
+            if obj.is_equilibrium
+                val='';
+                return
+            end
             if obj.So<=-eps
                 val='A';
             elseif abs(obj.So)< eps
@@ -309,6 +333,10 @@ classdef Backwater < handle
             end
         end
         function val=get.curve_type(obj)
+            if obj.is_equilibrium
+                val='';
+                return
+            end
             if obj.So>eps
                 if obj.a0>obj.a_critical && obj.a0 > obj.a_equilibrium
                     val='1';
@@ -326,9 +354,13 @@ classdef Backwater < handle
             end                   
         end
         
+        function val=get.bed_level(obj)
+            val=Backwater.bed_level_static([obj.x0, obj.x_end],obj.x0,obj.zb0,obj.So);
+        end
+        
         %%% Ordinary methods %%%
         
-        function [x,a]=solve(obj)
+        function [x,a,c]=solve(obj)
         % Backwater/solve - solves the backwater curve
         %
         %   [x,a]=obj.solve() solve the backwater curve for the Backwater
@@ -339,7 +371,34 @@ classdef Backwater < handle
         %
         %   See also: Backwater, Backwater/x0, Backwater/x_end, ode45,
         %             Backwater/belanger_static
-            [x,a]=ode45(@(x,a) Backwater.belanger_static(a, obj.So, obj.Q./obj.b, obj.Chez, obj.g),[obj.x0, obj.x_end],obj.a0);
+            if isscalar(obj)
+                if obj.x0==obj.x_end
+                    x=[obj.x0; obj.x_end];
+                    a=obj.a0*[1; 1];
+                else
+                    if obj.a_target==obj.a_critical && ...
+                            ((obj.is_supercritical && obj.x_end>obj.x_target) ||...
+                            (~obj.is_supercritical && obj.x_end<obj.x_target))
+                        warning('Trying to solve backwater past critical depth, changing end of reach...')
+                        obj.x_end=obj.x_target;
+                    end
+                    [x,a]=ode45(@(x,a) Backwater.belanger_static(a, obj.So, obj.Q./obj.b, obj.Chez, obj.g),[obj.x0, obj.x_end],obj.a0);
+                end
+                x=x';
+                a=a';
+                c=ones(size(x));
+            else
+                % Solve the pieces
+                x=[];
+                a=[];
+                c=[];
+                for co=1:numel(obj)
+                    [tx,ta,tc]=solve(obj(co));
+                    c=[c tc*co];
+                    x=[x tx];
+                    a=[a ta];
+                end
+            end
         end
         
         function dx=bresse(obj,a)
@@ -372,39 +431,58 @@ classdef Backwater < handle
         %   the location of the imposed boundary condition
         %
         %   See also: Backwater
+        hold_status=get(gca,'NextPlot');
+        if isscalar(obj)
             [x_curve,a_curve]=obj.solve();
-            z_b=-x_curve*obj.So;
+            z_b=Backwater.bed_level_static(x_curve,obj.x0,obj.zb0,obj.So);
             z_w=z_b+a_curve;
-            z_b=-x_curve([1 end])*obj.So;
+            z_b=[obj.bed_level];
             z_c=z_b+obj.a_critical;
             z_e=z_b+obj.a_equilibrium;
-            hold_status=get(gca,'NextPlot');
             hold on
-            patch([obj.x0; obj.x_end([1;1]); obj.x0([1;1])], [min(z_b)*[1;1]-obj.bed_offset; z_b(2); z_b(1); z_b(1)-obj.bed_offset],obj.color_bed, 'linestyle','none');
-            patch([obj.x0; obj.x_end; flip(x_curve); obj.x0],[z_b; flip(z_w); z_b(1)], obj.color_water, 'linestyle','none')
+            patch([obj.x0 obj.x_end([1 1]) obj.x0([1 1])], [min(z_b)*[1 1]-obj.bed_offset  z_b(2)  z_b(1)  z_b(1)-obj.bed_offset],obj.color_bed, 'linestyle','none');
+            patch([obj.x0 obj.x_end flip(x_curve) obj.x0],[z_b flip(z_w) z_b(1)], obj.color_water, 'linestyle','none')
             if obj.a0<=obj.a_critical
-                h_align='right';
-            else
                 h_align='left';
+            else
+                h_align='right';
             end
             if all(isreal(z_e)) && all(isfinite(z_e))
                 plot(x_curve([1 end]),z_e,'b-.');
                 text(x_curve(1),z_e(1),'a_e','color','b','verticalalignment','middle','HorizontalAlignment',h_align);
             end
             plot(x_curve([1 end]),z_c,'r--');
-            plot(obj.x0,obj.a0,'b.','markersize',15)
-            text(obj.x0,obj.a0,'a_0','verticalalignment','middle','HorizontalAlignment',h_align,'color','b');
             text(x_curve(1),z_c(1),'a_c','color','r','verticalalignment','middle','HorizontalAlignment',h_align);
-            idx=max(1,floor(numel(a_curve)/2));
-            text(x_curve(idx), z_w(idx),[obj.slope_type,obj.curve_type],'VerticalAlignment','bottom','HorizontalAlignment',h_align)
-            set(gca,'xticklabel',get(gca,'xtick')/1000);
+            if ~obj.is_equilibrium
+                plot(obj.x0,obj.zb0+obj.a0,'b.','markersize',15)
+                text(obj.x0,obj.zb0+obj.a0,'a_0','verticalalignment','middle','HorizontalAlignment',h_align,'color','b');
+                idx=max(1,floor(numel(a_curve)/2));
+                text(x_curve(idx), z_w(idx),[obj.slope_type,obj.curve_type],'VerticalAlignment','bottom','HorizontalAlignment',h_align)
+            end
+        else
+            xbnd=[];
+            minzb=min([obj.bed_level]-reshape(repmat([obj.bed_offset],2,1),1,[]));
+            for co=1:numel(obj)
+                plot(obj(co))
+                z_b=min(obj(co).bed_level)-obj(co).bed_offset;
+                patch([obj(co).x0 obj(co).x_end([1 1]) obj(co).x0([1 1])], [minzb*[1 1] z_b([1 1]) minzb],obj(co).color_bed, 'linestyle','none');
+                xbnd=[xbnd obj(co).x_end obj(co).x0];
+            end
+%             set(gca,'xticklabel',get(gca,'xtick')/1000);
             set(gca,'tickdir','out')
-            set(gca,'YAxisLocation',h_align)
-            xlabel('x (km)')
+            xlabel('x (m)')
             ylabel('z (m)')
-            set(gca,'NextPlot',hold_status);
             axis tight
+            hold on
+            xbnd=unique(xbnd);
+            xbnd([1 end])=[];
+            for cb=1:numel(xbnd)
+                plot(xbnd(cb)*[1 1],ylim(),'k-.');
+            end
         end
+        set(gca,'NextPlot',hold_status);
+        end
+
     end
     methods (Static)
         function dadx=belanger_static(a, So, q, C, g)
@@ -459,6 +537,9 @@ classdef Backwater < handle
         %   See also: Backwater, Backwater/bresse, Backwater/bresse_static
             Sc=g/C^2;
             dx=ac/Sc*(eta1-eta0+.25*(eta0.^4-eta1.^4));
+        end
+        function z=bed_level_static(x, x0, zb0, So)
+            z=zb0-(x-x0).*So;
         end
     end
 end
