@@ -19,17 +19,39 @@ classdef Backwater < handle
 %
 %   Backwater properties (Computed, Read only):
 %   a_equilibrium - equilibrium depth (m)
+%   u_equilibrium - equilibrium velocity (m/s)
 %   a_critical - critical depth (m)
 %   a_target - depth at which computation stops (m)
 %   x_target - target distance for computation (m)
 %   Sc - critical slope for given friction (-)
 %   slope_type - type of slope (backwater classification)
 %   curve_type - type of curve (backwater classification)
+%   bed_level - bed level elevation (m)
+%   is_supercritical - whether flow is supercritical (true|false)
+%   is_equilibrium - whether flow is in equilibrium (true|false)
+%   x_curve - the x-coordinate of the solved backwater (m)
+%   a_curve - depth profile of the backwater (m)
+%   dadx_curve - x-gradient of depth (-)
+%   u_curve - velocity profile along the backwater (m/s)
+%   dudx_curve - x-gradient of velocity (-)
+%   qs_curve - sediment transport rate along backwater (m^2/s)
+%   dqsdx_curve - gradient of sediment transport along backwater (m/s)
+%   dzbdt_curve - erosion/deposition rate of the bed along backwater (m/s)
+%   a_morf_equilibrium - depth at morphological equilibrium (m)
+%   So_morf_equilibrium - bed-slope at morphological equilibrium (-)
 %
 %   Backwater methods:
 %   solve - solve the backwater curve numerically
-%   plot - plot the backwater curve
 %   bresse - analytical backwater solver
+%   plot - plot the backwater curve
+%   plot_velocity - plot the velocity profile
+%   plot_vel_gradient - plot the velocity gradient
+%   plot_qs_gradient - plot sediment transport gradient
+%   plot_zb_gradient - plot erosion/deposition rate
+%   plot_gradient - generic gradient plotting function
+%   plot_curve_interfaces - plot dashed lines at transition of curves
+%   plot_initial_ersed - plot backwater and gradient for init eros/sediment
+%   plot_morf_equilibrium - plot the morphological equilibrium
 %
 %   Backwater static methods:
 %   belanger_static - Equation of Belanger (for use with ode solver)
@@ -60,7 +82,8 @@ classdef Backwater < handle
         % see also: Backwater
         g(1,1) double = 9.81; % accelaration of gravity (L T^-2)
     end
-    properties
+
+    properties(SetObservable)
         %% set input variables
         % Backwater/Q - Discharge
         %
@@ -120,6 +143,12 @@ classdef Backwater < handle
         %
         % see also: Backwater, Backwater/x_target, Backwater/solve
         x_end (1,1) double {mustBeFinite, mustBeReal} = -40000;
+    end
+    properties
+        m_sed_transp (1,1) double = 2.3e-4 
+        n_sed_transp (1,1) double = 5
+        porosity (1,1) double = 0.6
+        qs_morf_eq (1,1) double = 1.3e-4
         
         % Backwater/target_fract - fraction to estimate end of computation
         %
@@ -131,7 +160,7 @@ classdef Backwater < handle
         %   see also: Backwater, Backwater/x_target, Backwater/a_target
         target_fract(1,1) double {mustBeFinite, mustBePositive, mustBeLessThan(target_fract,1), mustBeReal} = exp(-3);
         
-        % Backwater/color_water - color of the water used in plots
+        % Backwater/color_water - color of the water used in plotsobj
         %
         %   Defines the color of water as RGB values. Requirements: double,
         %   3 element row vector, finite, >=0, <=1, real.
@@ -171,6 +200,13 @@ classdef Backwater < handle
         %   See also: Backwater, Backwater/a_critical
         a_equilibrium
 
+        % Backwater/e_equilibrium - computes the equilibrium velocity (m/s)
+        %
+        %   Compute the equilibrium velocity (m/s). 
+        %
+        %   See also: Backwater, Backwater/a_equilibrium
+        u_equilibrium
+        
         % Backwater/a_critical - computes the critical depth (m)
         %
         %   Compute the critical depth (m). The value is always positive
@@ -249,16 +285,163 @@ classdef Backwater < handle
         %       Backwater/a_equilibrium, Backwater/slope_type
         curve_type
         
+        % Backwater/bed_level - starting and ending bed-level
+        %
+        %   starting and ending bed-level (m)
+        %
+        %   See also: Backwater, So
         bed_level
+        
+        % Backwater/is_supercritical - whether flow is supercritical
+        %
+        %   returns boolean indicating whether flow is supercritical
+        %
+        %   See also: Backwater, is_equilibrium
         is_supercritical
+        
+        % Backwater/is_equilibrium - whether flow is in equilibrium
+        %
+        %   returns boolean indicating whether flow is in equilibrium, or
+        %   uniform
+        %
+        %   See also: Backwater, is_supercritical
         is_equilibrium
+        
+        % Backwater/x_curve - x-coordinate of backwater solution
+        %
+        %   returns the x-coordinate of the backwater solution (m). All
+        %   properties ending with '_curve' are given at the locations in
+        %   the x_curve property. This property is the output of the solve
+        %   method, and is cached. When changing a property it is
+        %   recomputed. Using this instead of directly calling the solve
+        %   routine saves unnecessary recomputations of the backwater curve
+        %
+        %   See also: Backwater, solve, a_curve, u_curve
+        x_curve
+        
+        % Backwater/a_curve - depth of backwater solution
+        %
+        %   returns the depth along the backwater (m) at the locations
+        %   given in the x_curve property. This property is the output of 
+        %   the solve method, and is cached. When changing a property it is
+        %   recomputed. Using this instead of directly calling the solve
+        %   routine saves unnecessary recomputations of the backwater curve
+        %
+        %   See also: Backwater, solve, x_curve, u_curve
+        a_curve
+        
+        % Backwater/dadx_curve - x-gradient of depth
+        %
+        %   returns the gradient in x-direction of the depth (-) at the
+        %   locations given in the x_curve property.
+        %
+        %   See also: Backwater, x_curve, u_curve
+        dadx_curve
+        
+        % Backwater/u_curve - velocity along the backwater
+        %
+        %   return the profile of velocity along the backwater (m/s) at the
+        %   locations given in the x_curve property.
+        %
+        %   See also: Backwater, x_curve, a_curve
+        u_curve
+        
+        % Backwater/dudx_curve - x-gradient of velocity
+        %
+        %   returns the gradient in x-direction of the velocity (1/s) at
+        %   the locations given in the x_curve property.
+        %
+        %   See also: Backwater, x_curve, u_curve
+        dudx_curve
+        
+        % Backwater/qs_curve - sediment transport rates along the backwater
+        %
+        %   returns the sediment transport rates along the backwater curve
+        %   (m^2/s) at the locations given in x-curve.
+        %
+        %   See also: Backwater, x_curve, m_sed_transport, n_sed_transport
+        qs_curve
+        
+        % Backwater/dqsdx_curve - x-gradient of sediment transport rate
+        %
+        %   returns the gradient in x-direction of the sediment transport
+        %   rate (m/s) at the locations given in the x_curve property.
+        %
+        %   See also: Backwater, x_curve, qs_curve
+        dqsdx_curve
+        
+        % Backwater/dzbdt_curve - erosion/sedimentation rates
+        %
+        %   returns the erosion and sedimentation rates (m/s) at the
+        %   locations given in the x_curve property. Computed using Exner's
+        %   equation.
+        %
+        %   See also: Backwater, x_curve, porosity
+        dzbdt_curve
+        
+        % Backwater/a_morf_equilibrium - depth at  morphological equilibr.
+        %
+        %   returns the depth (m) at the morphological equilibrium.
+        %
+        %   See also: Backwater, qs_morf_eq
+        a_morf_equilibrium
+        
+        % Backwater/So_morf_equilibrium - slope at morphological equilibr.
+        %
+        %   returns the bed-slope (-) at morphological equilibrium.
+        %
+        %   See also: Backwater, qs_morf_eq
+        So_morf_equilibrium
+
+    end
+    properties(Access=protected)
+        % whether the cached solution is still up to date
+        solution_is_up_to_date=false
+        
+        % cached x solution
+        x_cache=[]
+        
+        % cached a solution
+        a_cache=[]
     end
     methods
-        
         %%% Set and get methods %%%
-        
+        function set.Q(obj,val)
+            obj.Q=val;
+            obj.invalidate_solution();
+        end
+        function set.b(obj,val)
+            obj.b=val;
+            obj.invalidate_solution();
+        end
+        function set.So(obj,val)
+            obj.So=val;
+            obj.invalidate_solution();
+        end
+        function set.Chez(obj,val)
+            obj.Chez=val;
+            obj.invalidate_solution();
+        end
+        function set.x0(obj,val)
+            obj.x0=val;
+            obj.invalidate_solution();
+        end
+        function set.a0(obj,val)
+            obj.a0=val;
+            obj.invalidate_solution();
+        end
+       
         function val=get.a_equilibrium(obj)
             val=(obj.Q^2/obj.Chez^2/obj.So/obj.b^2)^(1/3);
+        end
+        function val=get.a_morf_equilibrium(obj)
+            val=(obj.m_sed_transp/obj.qs_morf_eq).^(1/obj.n_sed_transp)*obj.Q./obj.b;
+        end
+        function val=get.So_morf_equilibrium(obj)
+            val=obj.b/obj.Chez^2/obj.Q*(obj.qs_morf_eq/obj.m_sed_transp)^(3./obj.n_sed_transp);
+        end
+        function val=get.u_equilibrium(obj)
+            val=obj.Q/obj.b/obj.a_equilibrium;
         end
         function val=get.a_critical(obj)
             val=(obj.Q^2/obj.g/obj.b^2)^(1/3); 
@@ -304,6 +487,7 @@ classdef Backwater < handle
                     obj.x_end=val;
                 end
             end
+            obj.invalidate_solution();
         end
         function val=get.x_target(obj)
             if obj.is_equilibrium
@@ -358,8 +542,37 @@ classdef Backwater < handle
             val=Backwater.bed_level_static([obj.x0, obj.x_end],obj.x0,obj.zb0,obj.So);
         end
         
+        function val=get.x_curve(obj)
+            if ~obj.solution_is_up_to_date
+                obj.set_solution_cache();
+            end
+            val=obj.x_cache;
+        end
+        function val=get.a_curve(obj)
+            if ~obj.solution_is_up_to_date
+                obj.set_solution_cache();
+            end
+            val=obj.a_cache;
+        end   
+        function val=get.u_curve(obj)
+            val=obj.Q/obj.b./obj.a_curve;
+        end
+        function val=get.qs_curve(obj)
+            val=obj.m_sed_transp*obj.u_curve.^obj.n_sed_transp;
+        end
+        function val=get.dadx_curve(obj)
+            val=Backwater.belanger_static(obj.a_curve,obj.So,obj.Q./obj.b,obj.Chez,obj.g);
+        end
+        function val=get.dudx_curve(obj)
+            val=-obj.Q./obj.b./obj.a_curve.^2.*obj.dadx_curve;
+        end
+        function val=get.dqsdx_curve(obj)
+            val=-obj.n_sed_transp*obj.qs_curve./obj.a_curve.*obj.dadx_curve;
+        end
+        function val=get.dzbdt_curve(obj)
+            val=-1/(1-obj.porosity).*obj.dqsdx_curve;
+        end
         %%% Ordinary methods %%%
-        
         function [x,a,c]=solve(obj)
         % Backwater/solve - solves the backwater curve
         %
@@ -433,56 +646,211 @@ classdef Backwater < handle
         %   See also: Backwater
         hold_status=get(gca,'NextPlot');
         if isscalar(obj)
-            [x_curve,a_curve]=obj.solve();
-            z_b=Backwater.bed_level_static(x_curve,obj.x0,obj.zb0,obj.So);
-            z_w=z_b+a_curve;
+            z_b=Backwater.bed_level_static(obj.x_curve,obj.x0,obj.zb0,obj.So);
+            z_w=z_b+obj.a_curve;
             z_b=[obj.bed_level];
             z_c=z_b+obj.a_critical;
             z_e=z_b+obj.a_equilibrium;
             hold on
             patch([obj.x0 obj.x_end([1 1]) obj.x0([1 1])], [min(z_b)*[1 1]-obj.bed_offset  z_b(2)  z_b(1)  z_b(1)-obj.bed_offset],obj.color_bed, 'linestyle','none');
-            patch([obj.x0 obj.x_end flip(x_curve) obj.x0],[z_b flip(z_w) z_b(1)], obj.color_water, 'linestyle','none')
-            if obj.a0<=obj.a_critical
+            patch([obj.x0 obj.x_end flip(obj.x_curve) obj.x0],[z_b flip(z_w) z_b(1)], obj.color_water, 'linestyle','none')
+            if obj.is_supercritical
                 h_align='left';
             else
                 h_align='right';
             end
             if all(isreal(z_e)) && all(isfinite(z_e))
-                plot(x_curve([1 end]),z_e,'b-.');
-                text(x_curve(1),z_e(1),'a_e','color','b','verticalalignment','middle','HorizontalAlignment',h_align);
+                plot(obj.x_curve([1 end]),z_e,'b-.');
+                text(obj.x_curve(1),z_e(1),'a_e','color','b','verticalalignment','middle','HorizontalAlignment',h_align);
             end
-            plot(x_curve([1 end]),z_c,'r--');
-            text(x_curve(1),z_c(1),'a_c','color','r','verticalalignment','middle','HorizontalAlignment',h_align);
+            plot(obj.x_curve([1 end]),z_c,'r--');
+            text(obj.x_curve(1),z_c(1),'a_c','color','r','verticalalignment','middle','HorizontalAlignment',h_align);
             if ~obj.is_equilibrium
                 plot(obj.x0,obj.zb0+obj.a0,'b.','markersize',15)
                 text(obj.x0,obj.zb0+obj.a0,'a_0','verticalalignment','middle','HorizontalAlignment',h_align,'color','b');
-                idx=max(1,floor(numel(a_curve)/2));
-                text(x_curve(idx), z_w(idx),[obj.slope_type,obj.curve_type],'VerticalAlignment','bottom','HorizontalAlignment',h_align)
+                idx=max(1,floor(numel(obj.a_curve)/2));
+                text(obj.x_curve(idx), z_w(idx),[obj.slope_type,obj.curve_type],'VerticalAlignment','bottom','HorizontalAlignment',h_align)
             end
         else
-            xbnd=[];
             minzb=min([obj.bed_level]-reshape(repmat([obj.bed_offset],2,1),1,[]));
             for co=1:numel(obj)
                 plot(obj(co))
                 z_b=min(obj(co).bed_level)-obj(co).bed_offset;
                 patch([obj(co).x0 obj(co).x_end([1 1]) obj(co).x0([1 1])], [minzb*[1 1] z_b([1 1]) minzb],obj(co).color_bed, 'linestyle','none');
-                xbnd=[xbnd obj(co).x_end obj(co).x0];
             end
-%             set(gca,'xticklabel',get(gca,'xtick')/1000);
-            set(gca,'tickdir','out')
-            xlabel('x (m)')
-            ylabel('z (m)')
-            axis tight
-            hold on
-            xbnd=unique(xbnd);
+            obj.plot_curve_interfaces();
+        end
+        set(gca,'tickdir','out')
+        xlabel('x (m)')
+        ylabel('z (m)')
+        axis tight
+        set(gca,'NextPlot',hold_status);
+        end
+        
+        function plot_velocity(obj)
+        % Backwater/plot_velocity - plots the computed velocity profile
+        %
+        %   This function makes a plot of the computed velocity (m/s)
+        %   against the x-coordinate (m). 
+        %
+        %   See also: Backwater, plot
+            hold_status=get(gca,'NextPlot');
+            if isscalar(obj)
+                plot(obj.x_curve,obj.u_curve,'b-')
+                hold on
+                plot(obj.x_curve([1 end]), obj.u_equilibrium([1 1]),'k--')
+                if obj.is_supercritical
+                    h_align='left';
+                else
+                    h_align='right';
+                end
+                text(obj.x_curve(1),obj.u_equilibrium,'u_e','horizontalalignment',h_align,'verticalalignment','top')
+                set(gca,'tickdir','out')
+                xlabel('x (m)')
+                ylabel('u (m/s)')
+                axis tight
+            else
+                for co=1:numel(obj)
+                    obj(co).plot_velocity()
+                end
+                obj.plot_curve_interfaces()
+                set(gca,'NextPlot',hold_status)
+            end
+        end
+        function plot_vel_gradient(obj)
+            obj.plot_gradient('u_curve', 'dudx_curve', 'dudx (1/s)')
+        end
+        function plot_qs_gradient(obj)
+            obj.plot_gradient('qs_curve', 'dqsdx_curve', 'dqsdx (m/s)')
+        end
+        function plot_zb_gradient(obj)
+            obj.plot_gradient('qs_curve', 'dzbdt_curve', 'dzbdt (m/s)', true)
+        end
+        
+        function plot_curve_interfaces(obj)
+            xbnd=deal(nan(2,numel(obj)));
+            for co=1:numel(obj)
+                xbnd(:,co)=[obj(co).x_end;  obj(co).x0];
+            end
+            xbnd=unique(xbnd(:));
             xbnd([1 end])=[];
+            hold on
             for cb=1:numel(xbnd)
                 plot(xbnd(cb)*[1 1],ylim(),'k-.');
             end
         end
-        set(gca,'NextPlot',hold_status);
+        function plot_initial_ersed(obj)
+            a(1)=subplot(4,1,1);
+            plot(obj)
+            a(end+1)=subplot(4,1,2);
+            plot_velocity(obj)
+            a(end+1)=subplot(4,1,3);
+            plot_qs_gradient(obj)
+            a(end+1)=subplot(4,1,4);
+            plot_zb_gradient(obj)
+            linkaxes(a,'x');
         end
-
+        function plot_gradient(obj,curve_name, gradient_curve_name, curve_label, invert_flag)
+            if nargin<5
+                invert_flag=false;
+            end
+            hold_status=get(gca,'NextPlot');
+            if isscalar(obj)
+                plot(obj.x_curve,obj.(gradient_curve_name),'b-','linewidth',1.5)
+                hold on
+                plot(obj.x_curve([1 end]), [0 0],'k--')
+                set(gca,'tickdir','out')
+                xlabel('x (m)')
+                ylabel(curve_label)
+                axis tight
+            else
+                % draw interfaces between curves
+                for co=1:numel(obj)
+                    obj(co).plot_gradient(curve_name,gradient_curve_name, curve_label)
+                end
+                obj.plot_curve_interfaces();
+                
+                % find infinite gradients
+                x=[obj.x_curve];
+                [x,idx]=sort(x);
+                u=[obj.(curve_name)];
+                u=u(idx);
+                dudx=[obj.(gradient_curve_name)];
+                dudx=dudx(idx);
+                fbnd=find(diff(x)==0);
+                arrow_dir=(-1).^(double(invert_flag))*sign(u(fbnd+1)-u(fbnd));
+                f_cont=arrow_dir==0;
+                fbnd(f_cont)=[];
+                arrow_dir(f_cont)=[];
+                arrow_idx=(arrow_dir+1)/2+1;
+                quiver_x=x(fbnd);
+                yl=ylim;
+                for cbnd=1:numel(arrow_idx)
+                    y_start=dudx(fbnd(cbnd));
+                    y_cent=yl(arrow_idx(cbnd));
+                    arrow_ysiz=0.05*(y_cent-y_start);
+                    y_lr=y_cent-arrow_ysiz;
+                    x_cent=quiver_x(cbnd);
+                    plot(x_cent*[1 1], [y_start y_cent],'b','linewidth',1.5)
+                    sgn=num2str(arrow_dir(cbnd),'%+d');
+                    sgn(end)=[];
+                    text(x_cent, y_lr,[sgn,'\infty'])
+                end
+                set(gca,'NextPlot',hold_status)
+           end            
+        end
+        function plot_morf_equilibrium(obj)
+            hold_status=get(gca,'nextplot');
+            x0s=[obj.x0];
+            if all([obj.is_supercritical])
+                order='ascend';
+            elseif all(~[obj.is_supercritical])
+                order='descend';
+            else
+                error('Cannot plot morphological equilibrium when reaches with sub- and supercritical flow are mixed')
+            end
+            [x0s, idx]=sort(x0s,order);
+            Sos=[obj.So_morf_equilibrium];
+            Sos=Sos(idx);
+            aes=[obj.a_morf_equilibrium];
+            aes=aes(idx);
+            xends=[obj.x_end];
+            xends=xends(idx);
+            zwend=cumsum(Backwater.bed_level_static(xends,x0s,0,Sos))+obj(idx(1)).zb0+aes(1);
+            zw=[obj(idx(1)).zb0+aes(1) zwend(1:end-1); zwend];
+            zw=zw(:);
+            xs=[x0s;xends];
+            xs=xs(:);
+            zb=zw-reshape(repmat(aes,[2 1]),[],1);
+            patch([xs; xs([end 1 1])], [zw; 0; 0; zw(1)],obj(1).color_water,'linestyle','none')
+            hold on
+            patch([xs; xs([end 1 1])], [zb; 0; 0; zb(1)],obj(1).color_bed,'linestyle','none')
+            obj.plot_curve_interfaces()
+            zb_orig=vertcat(obj(idx).bed_level)';
+            zb_orig=zb_orig(:);
+            h=plot(xs, zb_orig,'k--');
+            xlabel('x (m)')
+            ylabel('z (m)')
+            legend(h,'original bed level')
+            set(gca,'tickdir','out')
+            axis tight
+            set(gca,'nextplot',hold_status)
+        end
+    end
+    methods(Access=protected)
+        function set_solution_cache(obj)
+            if isscalar(obj)
+                [obj.x_cache,obj.a_cache]=obj.solve();
+                obj.solution_is_up_to_date=true;
+            else
+                for co=1:numel(obj)
+                    obj(co).set_solution_cache;
+                end
+            end
+        end
+        function invalidate_solution(obj)
+            obj.solution_is_up_to_date=false;
+        end
     end
     methods (Static)
         function dadx=belanger_static(a, So, q, C, g)
@@ -495,7 +863,7 @@ classdef Backwater < handle
         %   matlab builtin ode solvers.
         %
         %   See also: Backwater, Backwater/solve
-            dadx=(So-q.^2/C.^2./a^3)./(1-q.^2./g./a.^3);
+            dadx=(So-q.^2/C.^2./a.^3)./(1-q.^2./g./a.^3);
         end
         function phi=bresse_int(eta)
         % Backwater/bresse_int - solution to Bresse's integral
